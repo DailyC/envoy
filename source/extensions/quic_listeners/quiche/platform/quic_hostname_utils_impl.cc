@@ -19,15 +19,17 @@
 namespace quic {
 
 // static
-bool QuicHostnameUtilsImpl::IsValidSNI(quiche::QuicheStringPiece sni) {
+// NOLINTNEXTLINE(readability-identifier-naming)
+bool QuicHostnameUtilsImpl::IsValidSNI(absl::string_view sni) {
   // TODO(wub): Implement it on top of GoogleUrl, once it is available.
 
   return sni.find_last_of('.') != std::string::npos &&
-         Envoy::Http::Utility::Url().initialize(absl::StrCat("http://", sni));
+         Envoy::Http::Utility::Url().initialize(absl::StrCat("http://", sni), false);
 }
 
 // static
-std::string QuicHostnameUtilsImpl::NormalizeHostname(quiche::QuicheStringPiece hostname) {
+// NOLINTNEXTLINE(readability-identifier-naming)
+std::string QuicHostnameUtilsImpl::NormalizeHostname(absl::string_view hostname) {
   // TODO(wub): Implement it on top of GoogleUrl, once it is available.
   std::string host = absl::AsciiStrToLower(hostname);
 

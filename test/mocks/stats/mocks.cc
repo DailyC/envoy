@@ -2,7 +2,7 @@
 
 #include <memory>
 
-#include "common/stats/fake_symbol_table_impl.h"
+#include "common/stats/symbol_table_impl.h"
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -29,6 +29,12 @@ MockGauge::MockGauge() : used_(false), value_(0), import_mode_(ImportMode::Accum
   ON_CALL(*this, importMode()).WillByDefault(ReturnPointee(&import_mode_));
 }
 MockGauge::~MockGauge() = default;
+
+MockTextReadout::MockTextReadout() {
+  ON_CALL(*this, used()).WillByDefault(ReturnPointee(&used_));
+  ON_CALL(*this, value()).WillByDefault(ReturnPointee(&value_));
+}
+MockTextReadout::~MockTextReadout() = default;
 
 MockHistogram::MockHistogram() {
   ON_CALL(*this, unit()).WillByDefault(ReturnPointee(&unit_));

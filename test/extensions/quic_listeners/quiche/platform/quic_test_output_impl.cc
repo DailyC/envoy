@@ -8,7 +8,7 @@
 
 #include <cstdlib>
 
-#include "common/filesystem/filesystem_impl.h"
+#include "test/test_common/file_system_for_test.h"
 
 #include "absl/time/clock.h"
 #include "absl/time/time.h"
@@ -19,7 +19,7 @@
 namespace quic {
 namespace {
 
-void QuicRecordTestOutputToFile(const std::string& filename, quiche::QuicheStringPiece data) {
+void quicRecordTestOutputToFile(const std::string& filename, absl::string_view data) {
   const char* output_dir_env = std::getenv("QUIC_TEST_OUTPUT_DIR");
   if (output_dir_env == nullptr) {
     QUIC_LOG(WARNING) << "Could not save test output since QUIC_TEST_OUTPUT_DIR is not set";
@@ -36,7 +36,7 @@ void QuicRecordTestOutputToFile(const std::string& filename, quiche::QuicheStrin
     output_dir += '/';
   }
 
-  Envoy::Filesystem::InstanceImplPosix file_system;
+  Envoy::Filesystem::Instance& file_system = Envoy::Filesystem::fileSystemForTest();
   if (!file_system.directoryExists(output_dir)) {
     QUIC_LOG(ERROR) << "Directory does not exist while writing test output: " << output_dir;
     return;
@@ -64,11 +64,13 @@ void QuicRecordTestOutputToFile(const std::string& filename, quiche::QuicheStrin
 }
 } // namespace
 
-void QuicSaveTestOutputImpl(quiche::QuicheStringPiece filename, quiche::QuicheStringPiece data) {
-  QuicRecordTestOutputToFile(filename.data(), data);
+// NOLINTNEXTLINE(readability-identifier-naming)
+void QuicSaveTestOutputImpl(absl::string_view filename, absl::string_view data) {
+  quicRecordTestOutputToFile(filename.data(), data);
 }
 
-bool QuicLoadTestOutputImpl(quiche::QuicheStringPiece filename, std::string* data) {
+// NOLINTNEXTLINE(readability-identifier-naming)
+bool QuicLoadTestOutputImpl(absl::string_view filename, std::string* data) {
   const char* read_dir_env = std::getenv("QUIC_TEST_OUTPUT_DIR");
   if (read_dir_env == nullptr) {
     QUIC_LOG(WARNING) << "Could not load test output since QUIC_TEST_OUTPUT_DIR is not set";
@@ -87,7 +89,7 @@ bool QuicLoadTestOutputImpl(quiche::QuicheStringPiece filename, std::string* dat
 
   const std::string read_path = read_dir + filename.data();
 
-  Envoy::Filesystem::InstanceImplPosix file_system;
+  Envoy::Filesystem::Instance& file_system = Envoy::Filesystem::fileSystemForTest();
   if (!file_system.fileExists(read_path)) {
     QUIC_LOG(ERROR) << "Test output file does not exist: " << read_path;
     return false;
@@ -96,7 +98,8 @@ bool QuicLoadTestOutputImpl(quiche::QuicheStringPiece filename, std::string* dat
   return true;
 }
 
-void QuicRecordTraceImpl(quiche::QuicheStringPiece identifier, quiche::QuicheStringPiece data) {
+// NOLINTNEXTLINE(readability-identifier-naming)
+void QuicRecordTraceImpl(absl::string_view identifier, absl::string_view data) {
   const testing::TestInfo* test_info = testing::UnitTest::GetInstance()->current_test_info();
 
   std::string timestamp = absl::FormatTime("%Y%m%d%H%M%S", absl::Now(), absl::LocalTimeZone());
@@ -104,7 +107,7 @@ void QuicRecordTraceImpl(quiche::QuicheStringPiece identifier, quiche::QuicheStr
   std::string filename = fmt::sprintf("%s.%s.%s.%s.qtr", test_info->name(),
                                       test_info->test_case_name(), identifier.data(), timestamp);
 
-  QuicRecordTestOutputToFile(filename, data);
+  quicRecordTestOutputToFile(filename, data);
 }
 
 } // namespace quic

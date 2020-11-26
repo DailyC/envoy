@@ -1,10 +1,12 @@
-#include "envoy/config/trace/v3/trace.pb.h"
-#include "envoy/config/trace/v3/trace.pb.validate.h"
+#include "envoy/config/trace/v3/http_tracer.pb.h"
+#include "envoy/config/trace/v3/zipkin.pb.h"
+#include "envoy/config/trace/v3/zipkin.pb.validate.h"
 #include "envoy/registry/registry.h"
 
 #include "extensions/tracers/zipkin/config.h"
 
-#include "test/mocks/server/mocks.h"
+#include "test/mocks/server/tracer_factory.h"
+#include "test/mocks/server/tracer_factory_context.h"
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -28,7 +30,7 @@ TEST(ZipkinTracerConfigTest, ZipkinHttpTracer) {
   http:
     name: zipkin
     typed_config:
-      "@type": type.googleapis.com/envoy.config.trace.v2.ZipkinConfig
+      "@type": type.googleapis.com/envoy.config.trace.v3.ZipkinConfig
       collector_cluster: fake_cluster
       collector_endpoint: /api/v1/spans
       collector_endpoint_version: HTTP_JSON
@@ -55,7 +57,7 @@ TEST(ZipkinTracerConfigTest, ZipkinHttpTracerWithTypedConfig) {
   http:
     name: zipkin
     typed_config:
-      "@type": type.googleapis.com/envoy.config.trace.v2.ZipkinConfig
+      "@type": type.googleapis.com/envoy.config.trace.v3.ZipkinConfig
       collector_cluster: fake_cluster
       collector_endpoint: /api/v2/spans
       collector_endpoint_version: HTTP_PROTO
@@ -69,12 +71,6 @@ TEST(ZipkinTracerConfigTest, ZipkinHttpTracerWithTypedConfig) {
       configuration.http(), ProtobufMessage::getStrictValidationVisitor(), factory);
   Tracing::HttpTracerSharedPtr zipkin_tracer = factory.createHttpTracer(*message, context);
   EXPECT_NE(nullptr, zipkin_tracer);
-}
-
-TEST(ZipkinTracerConfigTest, DoubleRegistrationTest) {
-  EXPECT_THROW_WITH_MESSAGE(
-      (Registry::RegisterFactory<ZipkinTracerFactory, Server::Configuration::TracerFactory>()),
-      EnvoyException, "Double registration for name: 'envoy.tracers.zipkin'");
 }
 
 // Test that the deprecated extension name still functions.

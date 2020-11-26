@@ -22,7 +22,7 @@ Cluster::Cluster(
     Server::Configuration::TransportSocketFactoryContextImpl& factory_context,
     Stats::ScopePtr&& stats_scope, bool added_via_api)
     : Upstream::BaseDynamicClusterImpl(cluster, runtime, factory_context, std::move(stats_scope),
-                                       added_via_api),
+                                       added_via_api, factory_context.dispatcher().timeSource()),
       dns_cache_manager_(cache_manager_factory.get()),
       dns_cache_(dns_cache_manager_->getCache(config.dns_cache_config())),
       update_callbacks_handle_(dns_cache_->addUpdateCallbacks(*this)), local_info_(local_info),
@@ -107,7 +107,7 @@ void Cluster::addOrUpdateWorker(
       new_host_map->try_emplace(host, host_info,
                                 std::make_shared<Upstream::LogicalHost>(
                                     info(), host, host_info->address(), dummy_locality_lb_endpoint_,
-                                    dummy_lb_endpoint_, nullptr));
+                                    dummy_lb_endpoint_, nullptr, time_source_));
   if (hosts_added == nullptr) {
     hosts_added = std::make_unique<Upstream::HostVector>();
   }
@@ -165,12 +165,22 @@ void Cluster::onDnsHostRemove(const std::string& host) {
 
 Upstream::HostConstSharedPtr
 Cluster::LoadBalancer::chooseHost(Upstream::LoadBalancerContext* context) {
-  if (!context || !context->downstreamHeaders()) {
+  if (!context) {
     return nullptr;
   }
 
-  const auto host_it =
-      host_map_->find(context->downstreamHeaders()->Host()->value().getStringView());
+  absl::string_view host;
+  if (context->downstreamHeaders()) {
+    host = context->downstreamHeaders()->getHostValue();
+  } else if (context->downstreamConnection()) {
+    host = context->downstreamConnection()->requestedServerName();
+  }
+
+  if (host.empty()) {
+    return nullptr;
+  }
+
+  const auto host_it = host_map_->find(host);
   if (host_it == host_map_->end()) {
     return nullptr;
   } else {
@@ -187,12 +197,13 @@ ClusterFactory::createClusterWithConfig(
     Server::Configuration::TransportSocketFactoryContextImpl& socket_factory_context,
     Stats::ScopePtr&& stats_scope) {
   Extensions::Common::DynamicForwardProxy::DnsCacheManagerFactoryImpl cache_manager_factory(
-      context.singletonManager(), context.dispatcher(), context.tls(), context.random(),
-      context.stats());
+      context.singletonManager(), context.dispatcher(), context.tls(),
+      context.api().randomGenerator(), context.runtime(), context.stats());
   envoy::config::cluster::v3::Cluster cluster_config = cluster;
   if (cluster_config.has_upstream_http_protocol_options()) {
-    if (!cluster_config.upstream_http_protocol_options().auto_sni() ||
-        !cluster_config.upstream_http_protocol_options().auto_san_validation()) {
+    if (!proto_config.allow_insecure_cluster_options() &&
+        (!cluster_config.upstream_http_protocol_options().auto_sni() ||
+         !cluster_config.upstream_http_protocol_options().auto_san_validation())) {
       throw EnvoyException(
           "dynamic_forward_proxy cluster must have auto_sni and auto_san_validation true when "
           "configured with upstream_http_protocol_options");

@@ -18,8 +18,7 @@
 #include "test/mocks/network/mocks.h"
 #include "test/mocks/router/mocks.h"
 #include "test/mocks/runtime/mocks.h"
-#include "test/mocks/server/mocks.h"
-#include "test/mocks/upstream/mocks.h"
+#include "test/mocks/server/factory_context.h"
 #include "test/test_common/utility.h"
 
 #include "absl/types/optional.h"
@@ -41,8 +40,9 @@ absl::optional<envoy::config::accesslog::v3::AccessLog> testUpstreamLog() {
   const std::string yaml = R"EOF(
 name: accesslog
 typed_config:
-  "@type": type.googleapis.com/envoy.config.accesslog.v2.FileAccessLog
-  format: "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL% %RESPONSE_CODE%
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+  log_format:
+    text_format: "%REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL% %RESPONSE_CODE%
     %RESPONSE_FLAGS% %BYTES_RECEIVED% %BYTES_SENT% %REQ(:AUTHORITY)% %UPSTREAM_HOST%
     %UPSTREAM_LOCAL_ADDRESS% %RESP(X-UPSTREAM-HEADER)% %TRAILER(X-TRAILER)%\n"
   path: "/dev/null"
@@ -63,8 +63,8 @@ public:
   // Filter
   RetryStatePtr createRetryState(const RetryPolicy&, Http::RequestHeaderMap&,
                                  const Upstream::ClusterInfo&, const VirtualCluster*,
-                                 Runtime::Loader&, Runtime::RandomGenerator&, Event::Dispatcher&,
-                                 Upstream::ResourcePriority) override {
+                                 Runtime::Loader&, Random::RandomGenerator&, Event::Dispatcher&,
+                                 TimeSource&, Upstream::ResourcePriority) override {
     EXPECT_EQ(nullptr, retry_state_);
     retry_state_ = new NiceMock<MockRetryState>();
     return RetryStatePtr{retry_state_};
@@ -138,7 +138,7 @@ public:
               EXPECT_CALL(encoder.stream_, connectionLocalAddress())
                   .WillRepeatedly(ReturnRef(upstream_local_address1_));
               callbacks.onPoolReady(encoder, context_.cluster_manager_.conn_pool_.host_,
-                                    stream_info_);
+                                    stream_info_, Http::Protocol::Http10);
               return nullptr;
             }));
     expectResponseTimerCreate();
@@ -176,7 +176,7 @@ public:
               EXPECT_CALL(encoder1.stream_, connectionLocalAddress())
                   .WillRepeatedly(ReturnRef(upstream_local_address1_));
               callbacks.onPoolReady(encoder1, context_.cluster_manager_.conn_pool_.host_,
-                                    stream_info_);
+                                    stream_info_, Http::Protocol::Http10);
               return nullptr;
             }));
     expectPerTryTimerCreate();
@@ -205,7 +205,7 @@ public:
               EXPECT_CALL(encoder2.stream_, connectionLocalAddress())
                   .WillRepeatedly(ReturnRef(upstream_local_address2_));
               callbacks.onPoolReady(encoder2, context_.cluster_manager_.conn_pool_.host_,
-                                    stream_info_);
+                                    stream_info_, Http::Protocol::Http10);
               return nullptr;
             }));
     expectPerTryTimerCreate();
@@ -287,8 +287,9 @@ TEST_F(RouterUpstreamLogTest, LogTimestampsAndDurations) {
   const std::string yaml = R"EOF(
 name: accesslog
 typed_config:
-  "@type": type.googleapis.com/envoy.config.accesslog.v2.FileAccessLog
-  format: "[%START_TIME%] %REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%
+  "@type": type.googleapis.com/envoy.extensions.access_loggers.file.v3.FileAccessLog
+  log_format:
+    text_format: "[%START_TIME%] %REQ(:METHOD)% %REQ(X-ENVOY-ORIGINAL-PATH?:PATH)% %PROTOCOL%
     %DURATION% %RESPONSE_DURATION% %REQUEST_DURATION%"
   path: "/dev/null"
   )EOF";

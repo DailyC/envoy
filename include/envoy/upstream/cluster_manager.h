@@ -4,10 +4,10 @@
 #include <functional>
 #include <memory>
 #include <string>
-#include <unordered_map>
 
 #include "envoy/access_log/access_log.h"
 #include "envoy/api/api.h"
+#include "envoy/common/random_generator.h"
 #include "envoy/config/bootstrap/v3/bootstrap.pb.h"
 #include "envoy/config/cluster/v3/cluster.pb.h"
 #include "envoy/config/core/v3/address.pb.h"
@@ -30,6 +30,9 @@
 #include "envoy/upstream/load_balancer.h"
 #include "envoy/upstream/thread_local_cluster.h"
 #include "envoy/upstream/upstream.h"
+
+#include "absl/container/flat_hash_set.h"
+#include "absl/container/node_hash_map.h"
 
 namespace Envoy {
 namespace Upstream {
@@ -70,12 +73,66 @@ using ClusterUpdateCallbacksHandlePtr = std::unique_ptr<ClusterUpdateCallbacksHa
 
 class ClusterManagerFactory;
 
+// These are per-cluster per-thread, so not "global" stats.
+struct ClusterConnectivityState {
+  ~ClusterConnectivityState() {
+    ASSERT(pending_streams_ == 0);
+    ASSERT(active_streams_ == 0);
+    ASSERT(connecting_stream_capacity_ == 0);
+  }
+
+  template <class T> void checkAndDecrement(T& value, uint32_t delta) {
+    ASSERT(delta <= value);
+    value -= delta;
+  }
+
+  template <class T> void checkAndIncrement(T& value, uint32_t delta) {
+    ASSERT(std::numeric_limits<T>::max() - value > delta);
+    value += delta;
+  }
+
+  void incrPendingStreams(uint32_t delta) { checkAndIncrement<uint32_t>(pending_streams_, delta); }
+  void decrPendingStreams(uint32_t delta) { checkAndDecrement<uint32_t>(pending_streams_, delta); }
+  void incrConnectingStreamCapacity(uint32_t delta) {
+    checkAndIncrement<uint64_t>(connecting_stream_capacity_, delta);
+  }
+  void decrConnectingStreamCapacity(uint32_t delta) {
+    checkAndDecrement<uint64_t>(connecting_stream_capacity_, delta);
+  }
+  void incrActiveStreams(uint32_t delta) { checkAndIncrement<uint32_t>(active_streams_, delta); }
+  void decrActiveStreams(uint32_t delta) { checkAndDecrement<uint32_t>(active_streams_, delta); }
+
+  // Tracks the number of pending streams for this ClusterManager.
+  uint32_t pending_streams_{};
+  // Tracks the number of active streams for this ClusterManager.
+  uint32_t active_streams_{};
+  // Tracks the available stream capacity if all connecting connections were connected.
+  //
+  // For example, if an H2 connection is started with concurrent stream limit of 100, this
+  // goes up by 100. If the connection is established and 2 streams are in use, it
+  // would be reduced to 98 (as 2 of the 100 are not available).
+  uint64_t connecting_stream_capacity_{};
+};
+
 /**
  * Manages connection pools and load balancing for upstream clusters. The cluster manager is
  * persistent and shared among multiple ongoing requests/connections.
+ * Cluster manager is initialized in two phases. In the first phase which begins at the construction
+ * all primary clusters (i.e. with endpoint assignments provisioned statically in bootstrap,
+ * discovered through DNS or file based CDS) are initialized. This phase may complete synchronously
+ * with cluster manager construction iff all clusters are STATIC and without health checks
+ * configured. At the completion of the first phase cluster manager invokes callback set through the
+ * `setPrimaryClustersInitializedCb` method.
+ * After the first phase has completed the server instance initializes services (i.e. RTDS) needed
+ * to successfully deploy the rest of dynamic configuration.
+ * In the second phase all secondary clusters (with endpoint assignments provisioned by xDS servers)
+ * are initialized and then the rest of the configuration provisioned through xDS.
  */
 class ClusterManager {
 public:
+  using PrimaryClustersReadyCallback = std::function<void()>;
+  using InitializationCompleteCallback = std::function<void()>;
+
   virtual ~ClusterManager() = default;
 
   /**
@@ -92,17 +149,42 @@ public:
                                   const std::string& version_info) PURE;
 
   /**
-   * Set a callback that will be invoked when all owned clusters have been initialized.
+   * Set a callback that will be invoked when all primary clusters have been initialized.
    */
-  virtual void setInitializedCb(std::function<void()> callback) PURE;
-
-  using ClusterInfoMap = std::unordered_map<std::string, std::reference_wrapper<const Cluster>>;
+  virtual void setPrimaryClustersInitializedCb(PrimaryClustersReadyCallback callback) PURE;
 
   /**
-   * @return ClusterInfoMap all current clusters. These are the primary (not thread local)
-   * clusters which should only be used for stats/admin.
+   * Set a callback that will be invoked when all owned clusters have been initialized.
    */
-  virtual ClusterInfoMap clusters() PURE;
+  virtual void setInitializedCb(InitializationCompleteCallback callback) PURE;
+
+  /**
+   * Start initialization of secondary clusters and then dynamically configured clusters.
+   * The "initialized callback" set in the method above is invoked when secondary and
+   * dynamically provisioned clusters have finished initializing.
+   */
+  virtual void
+  initializeSecondaryClusters(const envoy::config::bootstrap::v3::Bootstrap& bootstrap) PURE;
+
+  using ClusterInfoMap = absl::node_hash_map<std::string, std::reference_wrapper<const Cluster>>;
+  struct ClusterInfoMaps {
+    ClusterInfoMap active_clusters_;
+    ClusterInfoMap warming_clusters_;
+  };
+
+  /**
+   * @return ClusterInfoMap all current clusters including active and warming.
+   */
+  virtual ClusterInfoMaps clusters() PURE;
+
+  using ClusterSet = absl::flat_hash_set<std::string>;
+
+  /**
+   * @return const ClusterSet& providing the cluster names that are eligible as
+   *         xDS API config sources. These must be static (i.e. in the
+   *         bootstrap) and non-EDS.
+   */
+  virtual const ClusterSet& primaryClusters() PURE;
 
   /**
    * @return ThreadLocalCluster* the thread local cluster with the given name or nullptr if it
@@ -123,11 +205,13 @@ public:
    *
    * Can return nullptr if there is no host available in the cluster or if the cluster does not
    * exist.
+   *
+   * To resolve the protocol to use, we provide the downstream protocol (if one exists).
    */
-  virtual Http::ConnectionPool::Instance* httpConnPoolForCluster(const std::string& cluster,
-                                                                 ResourcePriority priority,
-                                                                 Http::Protocol protocol,
-                                                                 LoadBalancerContext* context) PURE;
+  virtual Http::ConnectionPool::Instance*
+  httpConnPoolForCluster(const std::string& cluster, ResourcePriority priority,
+                         absl::optional<Http::Protocol> downstream_protocol,
+                         LoadBalancerContext* context) PURE;
 
   /**
    * Allocate a load balanced TCP connection pool for a cluster. This is *per-thread* so that
@@ -174,8 +258,8 @@ public:
   virtual void shutdown() PURE;
 
   /**
-   * @return const envoy::api::v2::core::BindConfig& cluster manager wide bind configuration for new
-   *         upstream connections.
+   * @return const envoy::config::core::v3::BindConfig& cluster manager wide bind configuration for
+   * new upstream connections.
    */
   virtual const envoy::config::core::v3::BindConfig& bindConfig() const PURE;
 
@@ -278,7 +362,8 @@ public:
   allocateConnPool(Event::Dispatcher& dispatcher, HostConstSharedPtr host,
                    ResourcePriority priority, Http::Protocol protocol,
                    const Network::ConnectionSocket::OptionsSharedPtr& options,
-                   const Network::TransportSocketOptionsSharedPtr& transport_socket_options) PURE;
+                   const Network::TransportSocketOptionsSharedPtr& transport_socket_options,
+                   ClusterConnectivityState& state) PURE;
 
   /**
    * Allocate a TCP connection pool for the host. Pools are separated by 'priority' and
@@ -288,7 +373,8 @@ public:
   allocateTcpConnPool(Event::Dispatcher& dispatcher, HostConstSharedPtr host,
                       ResourcePriority priority,
                       const Network::ConnectionSocket::OptionsSharedPtr& options,
-                      Network::TransportSocketOptionsSharedPtr transport_socket_options) PURE;
+                      Network::TransportSocketOptionsSharedPtr transport_socket_options,
+                      ClusterConnectivityState& state) PURE;
 
   /**
    * Allocate a cluster from configuration proto.
@@ -330,7 +416,6 @@ public:
     ClusterManager& cm_;
     const LocalInfo::LocalInfo& local_info_;
     Event::Dispatcher& dispatcher_;
-    Runtime::RandomGenerator& random_;
     Singleton::Manager& singleton_manager_;
     ThreadLocal::SlotAllocator& tls_;
     ProtobufMessage::ValidationVisitor& validation_visitor_;
